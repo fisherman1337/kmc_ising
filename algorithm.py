@@ -43,11 +43,10 @@ class KmcIsing(multiprocessing.Process):
         self._delta_t: Model parameter.
         self._chosen_molecule: Model parameter.
         self._t: Model parameter.
-
     """
     # ==================================================================================================================
 
-    __class_path = "kmc_Ising.algorithm.KmcIsing"
+    __class_path = "kmc_ising.algorithm.KmcIsing"
 
     # ==================================================================================================================
 
@@ -63,6 +62,8 @@ class KmcIsing(multiprocessing.Process):
         self._delta_t = None
         self._chosen_molecule = None
         self._t = None
+        self._mt = None
+        self._jt = None
         # --------------------------------------------------------------------------------------------------------------
 
         # Attributes bounded with supporting goals: --------------------------------------------------------------------
@@ -76,21 +77,30 @@ class KmcIsing(multiprocessing.Process):
         """
         Count model in separate process.
         """
-        self._generate_state()
-        self._count_partial_sums()
-        self._count_r()
-        for i in range(self._steps):
-            self._generate_p()
-            self._count_delta_t()
-            self._choose_molecule()
-            self._add_delta_t()
-        print(self._delta_t)
 
         # Send notification to the notification handler: ---------------------------------------------------------------
         Notification(where=f'{self.__class_path}.run()',
-                     what=f"""row number "{self._kwargs.get('#')}" in file "{self._filename}" is simulated""",
-                     task_end=True,
+                     what=f"""row number "{self._kwargs.get('#')}" in file "{self._filename}" simulation started  """,
                      for_verbose=True)()
+        # --------------------------------------------------------------------------------------------------------------
+        self._generate_state()
+        self._partial_sums = [x for x in self._state]
+        for i in range(self._steps):
+            self._count_partial_sums()
+            self._count_r()
+            self._generate_p()
+            self._count_delta_t()
+            self._choose_molecule()
+            self._change_spin()
+            self._add_to_t()
+            self._add_to_mt()
+            self._add_to_jt()
+        # Send notification to the notification handler: ---------------------------------------------------------------
+        Notification(where=f'{self.__class_path}.run()',
+                     what=f"""row number "{self._kwargs.get('#')}" in file "{self._filename}" is simulated:
+                             <U> = {self._jt/self._t}  
+                             <M> = {self._mt/self._t}   """,
+                     task_end=True)()
         # --------------------------------------------------------------------------------------------------------------
 
     # ==================================================================================================================
@@ -103,11 +113,7 @@ class KmcIsing(multiprocessing.Process):
         # If 'random' was passed: --------------------------------------------------------------------------------------
         if self._kwargs.get('S')[0] == 'random':
             for i in range(int(self._kwargs.get('N'))):
-                bit = random.getrandbits(1)
-                if bit == 0:
-                    self._state.append(-1)
-                else:
-                    self._state.append(1)
+                self._state.append(random.choice([-1, 1]))
         # --------------------------------------------------------------------------------------------------------------
 
         # If 'uniform' was passed: -------------------------------------------------------------------------------------
@@ -138,26 +144,30 @@ class KmcIsing(multiprocessing.Process):
         """
         Count sequence of the partial sums.
         """
-        for i in range(len(self._state)):
+        if self._chosen_molecule is None or self._chosen_molecule == 0:
+            start = 0
+        else:
+            start = self._chosen_molecule - 1
+        for i in range(start, len(self._state)):
             # Partial sum for the first molecule: ----------------------------------------------------------------------
             if i == 0:
                 u_ikt = (-self._kwargs.get('J')/2*(self._state[0]*self._state[-1] +
                          self._state[0]*self._state[1])-self._state[0]*self._kwargs.get('B'))
-                self._partial_sums.append(math.exp(u_ikt))
+                self._partial_sums[0] = math.exp(u_ikt)
             # ----------------------------------------------------------------------------------------------------------
 
             # Partial sum for the last molecule: -----------------------------------------------------------------------
             elif i == len(self._state)-1:
                 u_ikt = (-self._kwargs.get('J') / 2 * (self._state[-1] * self._state[-2] +
                          self._state[-1] * self._state[0]) - self._state[-1] * self._kwargs.get('B'))
-                self._partial_sums.append(math.exp(u_ikt) + self._partial_sums[i-1])
+                self._partial_sums[i] = math.exp(u_ikt) + self._partial_sums[i-1]
             # ----------------------------------------------------------------------------------------------------------
 
             # Partial sum for other molecules: -------------------------------------------------------------------------
             else:
                 u_ikt = (-self._kwargs.get('J') / 2 * (self._state[i] * self._state[i - 1] +
                          self._state[i] * self._state[i + 1]) - self._state[i] * self._kwargs.get('B'))
-                self._partial_sums.append(math.exp(u_ikt) + self._partial_sums[i-1])
+                self._partial_sums[i] = math.exp(u_ikt) + self._partial_sums[i-1]
             # ----------------------------------------------------------------------------------------------------------
 
     # ==================================================================================================================
@@ -182,7 +192,7 @@ class KmcIsing(multiprocessing.Process):
         """
         Model parameter counting.
         """
-        self._delta_t = 1/self._r * math.floor(math.log(1/self._p))
+        self._delta_t = 1/self._r * int(math.log(1/self._p))
 
     # ==================================================================================================================
 
@@ -198,7 +208,7 @@ class KmcIsing(multiprocessing.Process):
 
     # ==================================================================================================================
 
-    def _add_delta_t(self):
+    def _add_to_t(self):
         """
         Model parameter counting.
         """
@@ -207,6 +217,46 @@ class KmcIsing(multiprocessing.Process):
         self._t += self._delta_t
 
     # ==================================================================================================================
+
+    def _change_spin(self):
+        self._state[self._chosen_molecule] = random.choice([-1, 1])
+
+    # ==================================================================================================================
+
+    def _add_to_mt(self):
+        if self._mt is None:
+            self._mt = 0
+        self._mt += sum(self._state) * self._delta_t
+
+    # ==================================================================================================================
+
+    def _add_to_jt(self):
+        if self._jt is None:
+            self._jt = 0
+        partial_sum = 0
+        for i in range(len(self._state)):
+            # Interaction for the first molecule: ----------------------------------------------------------------------
+            if i == 0:
+                inter = (-self._kwargs.get('J')/2*(self._state[0] * self._state[-1] +
+                         self._state[0] * self._state[1]))
+                partial_sum += inter
+            # ----------------------------------------------------------------------------------------------------------
+
+            # Interaction for the last molecule: -----------------------------------------------------------------------
+            elif i == len(self._state) - 1:
+                inter = (-self._kwargs.get('J')/2*(self._state[-1] * self._state[-2] +
+                         self._state[-1] * self._state[0]))
+                partial_sum += inter
+            # ----------------------------------------------------------------------------------------------------------
+
+            # Interaction for other molecules: -------------------------------------------------------------------------
+            else:
+                inter = (-self._kwargs.get('J')/2 * (self._state[i] * self._state[i - 1] +
+                         self._state[i] * self._state[i + 1]))
+                partial_sum += inter
+            # ----------------------------------------------------------------------------------------------------------
+        self._jt += partial_sum * self._delta_t
+
 
 ########################################################################################################################
 # E N D   O F   F I L E .  #############################################################################################
